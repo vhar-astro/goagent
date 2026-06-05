@@ -18,13 +18,13 @@
   the iteration process.
 -->
 
-**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]
+**Language/Version**: [e.g., Go 1.24, Go 1.25 or NEEDS CLARIFICATION]
 
-**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]
+**Primary Dependencies**: [e.g., standard library only, chi, grpc-go or NEEDS CLARIFICATION]
 
 **Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 
-**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]
+**Testing**: [e.g., go test ./..., package-local _test.go, integration harness or NEEDS CLARIFICATION]
 
 **Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
 
@@ -40,7 +40,14 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+- Simplicity: What is the simplest design that works, and which more complex
+  alternatives were rejected?
+- Dependencies: Which non-stdlib dependencies are required, and why is each one
+  necessary?
+- Language Boundary: Does the plan stay entirely within Go, with no
+  TypeScript/Python/C++ implementation paths?
+- Documentation Freshness: For each external library, SDK, API, CLI, or cloud
+  dependency, what current documentation was verified through Context7?
 
 ## Project Structure
 
@@ -65,39 +72,31 @@ specs/[###-feature]/
 -->
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
-src/
-├── models/
-├── services/
-├── cli/
-└── lib/
+# Option 1: Single Go binary or CLI (DEFAULT)
+cmd/
+└── [app]/
+    └── main.go
 
-tests/
-├── contract/
-├── integration/
-└── unit/
+internal/
+├── app/
+├── domain/
+└── transport/
 
-# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
-backend/
-├── src/
-│   ├── models/
-│   ├── services/
-│   └── api/
-└── tests/
+pkg/                  # Only if functionality is intentionally reusable
 
-frontend/
-├── src/
-│   ├── components/
-│   ├── pages/
-│   └── services/
-└── tests/
+# Option 2: Go service with explicit API boundary
+cmd/
+└── [service]/
+    └── main.go
 
-# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
-api/
-└── [same as backend above]
+internal/
+├── api/
+├── service/
+├── store/
+└── platform/
 
-ios/ or android/
-└── [platform-specific structure: feature modules, UI flows, platform tests]
+test/
+└── integration/
 ```
 
 **Structure Decision**: [Document the selected structure and reference the real

@@ -98,6 +98,17 @@
 - **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
 - **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
 
+## Constitution Alignment *(mandatory)*
+
+- **CA-001 Simplicity**: [Describe the simplest viable design and name any more
+  complex alternatives intentionally rejected]
+- **CA-002 Dependencies**: [List every planned non-stdlib dependency or state
+  "standard library only", with justification for each addition]
+- **CA-003 Language Boundary**: [Confirm the feature is implemented entirely in
+  Go and does not require TypeScript, Python, or C++]
+- **CA-004 Current Docs**: [List external technologies that required current
+  documentation and record the Context7 sources consulted, or state "N/A"]
+
 ### Key Entities *(include if feature involves data)*
 
 - **[Entity 1]**: [What it represents, key attributes without implementation]
