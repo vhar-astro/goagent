@@ -24,9 +24,9 @@
 
 **Purpose**: Establish the Go CLI skeleton and baseline test layout for the feature.
 
-- [ ] T001 Initialize the Go CLI module and launch entrypoint in `go.mod` and `cmd/goagent/main.go`
-- [ ] T002 [P] Create the planned internal package skeleton in `internal/app/app.go`, `internal/cli/repl.go`, `internal/config/config.go`, `internal/modules/manifest.go`, `internal/provider/types.go`, `internal/session/session.go`, and `internal/tools/registry.go`
-- [ ] T003 [P] Create the baseline test layout in `internal/config/config_test.go` and `test/integration/base_session_test.go`
+- [X] T001 Initialize the Go CLI module and launch entrypoint in `go.mod` and `cmd/goagent/main.go`
+- [X] T002 [P] Create the planned internal package skeleton in `internal/app/app.go`, `internal/cli/repl.go`, `internal/config/config.go`, `internal/modules/manifest.go`, `internal/provider/types.go`, `internal/session/session.go`, and `internal/tools/registry.go`
+- [X] T003 [P] Create the baseline test layout in `internal/config/config_test.go` and `test/integration/base_session_test.go`
 
 ---
 
@@ -36,14 +36,14 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T004 Implement JSON config loading, default-path resolution, and provider profile validation in `internal/config/config.go`
-- [ ] T005 [P] Implement session state, conversation message models, and approval tracking in `internal/session/session.go`
-- [ ] T006 [P] Implement normalized provider request, response, and stream event types in `internal/provider/types.go`
-- [ ] T007 [P] Implement built-in tool registration, capability buckets, and schema uniqueness checks in `internal/tools/registry.go`
-- [ ] T008 Implement workspace boundary checks, timeout settings, and tool output truncation helpers in `internal/app/runtime.go`
-- [ ] T009 Implement CLI flag parsing and slash-command dispatch scaffolding in `internal/cli/commands.go`
-- [ ] T010 Implement the application bootstrap and empty session loop wiring in `internal/app/app.go` and `cmd/goagent/main.go`
-- [ ] T011 [P] Add foundational unit coverage for config, session approvals, and tool registry behavior in `internal/config/config_test.go`, `internal/session/session_test.go`, and `internal/tools/registry_test.go`
+- [X] T004 Implement JSON config loading, default-path resolution, and provider profile validation in `internal/config/config.go`
+- [X] T005 [P] Implement session state, conversation message models, and approval tracking in `internal/session/session.go`
+- [X] T006 [P] Implement normalized provider request, response, and stream event types in `internal/provider/types.go`
+- [X] T007 [P] Implement built-in tool registration, capability buckets, and schema uniqueness checks in `internal/tools/registry.go`
+- [X] T008 Implement workspace boundary checks, timeout settings, and tool output truncation helpers in `internal/app/runtime.go`
+- [X] T009 Implement CLI flag parsing and slash-command dispatch scaffolding in `internal/cli/commands.go`
+- [X] T010 Implement the application bootstrap and empty session loop wiring in `internal/app/app.go` and `cmd/goagent/main.go`
+- [X] T011 [P] Add foundational unit coverage for config, session approvals, and tool registry behavior in `internal/config/config_test.go`, `internal/session/session_test.go`, and `internal/tools/registry_test.go`
 
 **Checkpoint**: Foundation ready; user story work can proceed with shared runtime contracts in place.
 
@@ -57,18 +57,18 @@
 
 ### Tests for User Story 1
 
-- [ ] T012 [P] [US1] Add the base session integration scenario with a streaming stub provider in `test/integration/base_session_test.go`
-- [ ] T013 [P] [US1] Add built-in tool validation and workspace-boundary tests in `internal/tools/files_test.go` and `internal/tools/shell_test.go`
+- [X] T012 [P] [US1] Add the base session integration scenario with a streaming stub provider in `test/integration/base_session_test.go`
+- [X] T013 [P] [US1] Add built-in tool validation and workspace-boundary tests in `internal/tools/files_test.go` and `internal/tools/shell_test.go`
 
 ### Implementation for User Story 1
 
-- [ ] T014 [P] [US1] Implement workspace-scoped file read and file write tools in `internal/tools/files.go`
-- [ ] T015 [P] [US1] Implement workspace-scoped shell execution and direct URL fetch tools in `internal/tools/shell.go` and `internal/tools/web.go`
-- [ ] T016 [US1] Implement the provider HTTP client and streaming chunk parser in `internal/provider/client.go`
-- [ ] T017 [US1] Implement the conversation loop, tool-call handling, and truncated tool-result reinjection in `internal/app/session_runner.go`
-- [ ] T018 [US1] Implement interactive stdin/stdout handling and streamed assistant rendering in `internal/cli/repl.go`
-- [ ] T019 [US1] Enforce approval prompts and structured tool execution summaries in `internal/app/executor.go`
-- [ ] T020 [US1] Wire the default built-in tool set and base agent launch flow in `internal/app/app.go` and `cmd/goagent/main.go`
+- [X] T014 [P] [US1] Implement workspace-scoped file read and file write tools in `internal/tools/files.go`
+- [X] T015 [P] [US1] Implement workspace-scoped shell execution and direct URL fetch tools in `internal/tools/shell.go` and `internal/tools/web.go`
+- [X] T016 [US1] Implement the provider HTTP client and streaming chunk parser in `internal/provider/client.go`
+- [X] T017 [US1] Implement the conversation loop, tool-call handling, and truncated tool-result reinjection in `internal/app/session_runner.go`
+- [X] T018 [US1] Implement interactive stdin/stdout handling and streamed assistant rendering in `internal/cli/repl.go`
+- [X] T019 [US1] Enforce approval prompts and structured tool execution summaries in `internal/app/executor.go`
+- [X] T020 [US1] Wire the default built-in tool set and base agent launch flow in `internal/app/app.go` and `cmd/goagent/main.go`
 
 **Checkpoint**: User Story 1 should now run as a complete minimal coding-agent session.
 
@@ -82,16 +82,16 @@
 
 ### Tests for User Story 2
 
-- [ ] T021 [P] [US2] Add module manifest parsing and validation tests in `internal/modules/manifest_test.go`
-- [ ] T022 [P] [US2] Add attach/detach integration coverage with a stub module process in `test/integration/module_lifecycle_test.go`
+- [X] T021 [P] [US2] Add module manifest parsing and validation tests in `internal/modules/manifest_test.go`
+- [X] T022 [P] [US2] Add attach/detach integration coverage with a stub module process in `test/integration/module_lifecycle_test.go`
 
 ### Implementation for User Story 2
 
-- [ ] T023 [P] [US2] Implement module manifest loading and requested-capability validation in `internal/modules/manifest.go`
-- [ ] T024 [P] [US2] Implement the NDJSON module protocol client and process lifecycle handling in `internal/modules/process.go`
-- [ ] T025 [US2] Implement the attached-module registry and duplicate-tool detection in `internal/modules/registry.go`
-- [ ] T026 [US2] Implement `/attach` and `/detach` command handlers in `internal/cli/module_commands.go`
-- [ ] T027 [US2] Route module tool calls and detach cleanup through the session executor in `internal/app/module_executor.go`
+- [X] T023 [P] [US2] Implement module manifest loading and requested-capability validation in `internal/modules/manifest.go`
+- [X] T024 [P] [US2] Implement the NDJSON module protocol client and process lifecycle handling in `internal/modules/process.go`
+- [X] T025 [US2] Implement the attached-module registry and duplicate-tool detection in `internal/modules/registry.go`
+- [X] T026 [US2] Implement `/attach` and `/detach` command handlers in `internal/cli/module_commands.go`
+- [X] T027 [US2] Route module tool calls and detach cleanup through the session executor in `internal/app/module_executor.go`
 
 **Checkpoint**: User Story 2 should now extend and shrink the active tool surface at runtime without restarting the session.
 
