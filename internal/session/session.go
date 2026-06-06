@@ -60,6 +60,34 @@ type CapabilityApproval struct {
 	ApprovedAt time.Time
 }
 
+// CommandApproval tracks approval for one exact shell command signature.
+type CommandApproval struct {
+	Signature  string
+	Command    string
+	Workdir    string
+	ApprovedAt time.Time
+}
+
+// PendingApprovalStatus describes the decision state for one pending shell approval.
+type PendingApprovalStatus string
+
+const (
+	PendingApprovalStatusPending  PendingApprovalStatus = "pending"
+	PendingApprovalStatusApproved PendingApprovalStatus = "approved"
+	PendingApprovalStatusDenied   PendingApprovalStatus = "denied"
+)
+
+// PendingApprovalRequest stores the one shell approval request currently in flight.
+type PendingApprovalRequest struct {
+	ToolCallID string
+	ToolName   string
+	Command    string
+	Workdir    string
+	Signature  string
+	PromptText string
+	Status     PendingApprovalStatus
+}
+
 // ModuleProcess stores the session-visible state for one attached local module.
 type ModuleProcess struct {
 	Manifest modules.Manifest
@@ -93,29 +121,32 @@ func (m ModuleProcess) ToolSpecs() []tools.Spec {
 
 // Session stores the minimal runtime state for one CLI launch.
 type Session struct {
-	ID                   string
-	WorkspaceRoot        string
-	ProviderName         string
-	Model                string
-	ApprovedCapabilities map[string]CapabilityApproval
-	Messages             []Message
-	BuiltInTools         []tools.Spec
-	ModuleTools          []tools.Spec
-	AttachedModules      []ModuleProcess
+	ID                    string
+	WorkspaceRoot         string
+	ProviderName          string
+	Model                 string
+	ApprovedCapabilities  map[string]CapabilityApproval
+	ApprovedShellCommands map[string]CommandApproval
+	PendingShellApproval  *PendingApprovalRequest
+	Messages              []Message
+	BuiltInTools          []tools.Spec
+	ModuleTools           []tools.Spec
+	AttachedModules       []ModuleProcess
 }
 
 // New constructs a fresh in-memory session with empty approvals and history.
 func New(id, workspaceRoot, providerName, model string) *Session {
 	return &Session{
-		ID:                   id,
-		WorkspaceRoot:        workspaceRoot,
-		ProviderName:         providerName,
-		Model:                model,
-		ApprovedCapabilities: make(map[string]CapabilityApproval),
-		Messages:             make([]Message, 0),
-		BuiltInTools:         make([]tools.Spec, 0),
-		ModuleTools:          make([]tools.Spec, 0),
-		AttachedModules:      make([]ModuleProcess, 0),
+		ID:                    id,
+		WorkspaceRoot:         workspaceRoot,
+		ProviderName:          providerName,
+		Model:                 model,
+		ApprovedCapabilities:  make(map[string]CapabilityApproval),
+		ApprovedShellCommands: make(map[string]CommandApproval),
+		Messages:              make([]Message, 0),
+		BuiltInTools:          make([]tools.Spec, 0),
+		ModuleTools:           make([]tools.Spec, 0),
+		AttachedModules:       make([]ModuleProcess, 0),
 	}
 }
 
@@ -214,6 +245,9 @@ func (s *Session) Approve(name string, approvedAt time.Time) error {
 	if !tools.IsKnownCapability(name) {
 		return fmt.Errorf("unknown capability %q", name)
 	}
+	if name == tools.CapabilityShell {
+		return fmt.Errorf("capability %q requires command-specific approval", name)
+	}
 	if approvedAt.IsZero() {
 		approvedAt = time.Now().UTC()
 	}
@@ -242,6 +276,97 @@ func (s *Session) Approval(name string) (CapabilityApproval, bool) {
 func (s *Session) IsApproved(name string) bool {
 	approval, ok := s.ApprovedCapabilities[name]
 	return ok && approval.Approved
+}
+
+// ShellApprovalSignature returns the exact approval key for one shell request.
+func ShellApprovalSignature(command, workdir string) string {
+	return command + "\x00" + workdir
+}
+
+// ApproveShellCommand marks one exact shell command signature as approved.
+func (s *Session) ApproveShellCommand(command, workdir string, approvedAt time.Time) CommandApproval {
+	if approvedAt.IsZero() {
+		approvedAt = time.Now().UTC()
+	}
+
+	approval := CommandApproval{
+		Signature:  ShellApprovalSignature(command, workdir),
+		Command:    command,
+		Workdir:    workdir,
+		ApprovedAt: approvedAt,
+	}
+	s.ApprovedShellCommands[approval.Signature] = approval
+	return approval
+}
+
+// ShellApproval returns one exact shell command approval if it exists.
+func (s *Session) ShellApproval(command, workdir string) (CommandApproval, bool) {
+	approval, ok := s.ApprovedShellCommands[ShellApprovalSignature(command, workdir)]
+	return approval, ok
+}
+
+// IsShellCommandApproved reports whether one exact shell command is approved.
+func (s *Session) IsShellCommandApproved(command, workdir string) bool {
+	_, ok := s.ShellApproval(command, workdir)
+	return ok
+}
+
+// RevokeShellCommandApproval removes one exact shell command approval.
+func (s *Session) RevokeShellCommandApproval(command, workdir string) {
+	delete(s.ApprovedShellCommands, ShellApprovalSignature(command, workdir))
+}
+
+// SetPendingShellApproval replaces the current pending shell approval request.
+func (s *Session) SetPendingShellApproval(request PendingApprovalRequest) PendingApprovalRequest {
+	request.Signature = ShellApprovalSignature(request.Command, request.Workdir)
+	if request.Status == "" {
+		request.Status = PendingApprovalStatusPending
+	}
+
+	cloned := request
+	s.PendingShellApproval = &cloned
+	return cloned
+}
+
+// PendingApproval returns the current pending shell approval request.
+func (s *Session) PendingApproval() (PendingApprovalRequest, bool) {
+	if s.PendingShellApproval == nil {
+		return PendingApprovalRequest{}, false
+	}
+
+	return *s.PendingShellApproval, true
+}
+
+// ApprovePendingShellApproval marks the pending request approved and caches its signature.
+func (s *Session) ApprovePendingShellApproval(approvedAt time.Time) (CommandApproval, bool) {
+	if s.PendingShellApproval == nil {
+		return CommandApproval{}, false
+	}
+
+	approval := s.ApproveShellCommand(s.PendingShellApproval.Command, s.PendingShellApproval.Workdir, approvedAt)
+	s.PendingShellApproval.Status = PendingApprovalStatusApproved
+	s.PendingShellApproval.Signature = approval.Signature
+	return approval, true
+}
+
+// DenyPendingShellApproval marks the pending request denied.
+func (s *Session) DenyPendingShellApproval() bool {
+	if s.PendingShellApproval == nil {
+		return false
+	}
+
+	s.PendingShellApproval.Status = PendingApprovalStatusDenied
+	return true
+}
+
+// ClearPendingShellApproval removes the current pending shell approval request.
+func (s *Session) ClearPendingShellApproval() bool {
+	if s.PendingShellApproval == nil {
+		return false
+	}
+
+	s.PendingShellApproval = nil
+	return true
 }
 
 func (s *Session) rebuildModuleTools() {

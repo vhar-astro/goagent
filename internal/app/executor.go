@@ -36,7 +36,6 @@ const (
 
 var approvalRequiredCapabilities = map[string]struct{}{
 	tools.CapabilityWrite:  {},
-	tools.CapabilityShell:  {},
 	tools.CapabilityWeb:    {},
 	tools.CapabilityModule: {},
 }
@@ -89,6 +88,8 @@ type ToolExecutionResult struct {
 	OutputTruncated     bool
 	OutputDroppedBytes  int
 	ApprovalCommand     string
+	PendingApproval     *session.PendingApprovalRequest
+	ApprovalReused      bool
 }
 
 // Successful reports whether the tool call completed without errors.
@@ -276,6 +277,29 @@ func (e *Executor) executeShell(ctx context.Context, callID string, spec tools.S
 		}, err)
 	}
 
+	workdir, err := tools.ResolveShellWorkdir(e.runtime, input.Workdir)
+	if err != nil {
+		return e.failureResult(callID, spec.Name, spec.Source, spec.Capability, map[string]string{
+			"command": input.Command,
+			"error":   err.Error(),
+		}, err)
+	}
+
+	signature := tools.ShellApprovalSignature(input.Command, workdir)
+	if !e.session.IsShellCommandApproved(input.Command, workdir) {
+		pending := session.PendingApprovalRequest{
+			ToolCallID: callID,
+			ToolName:   spec.Name,
+			Command:    input.Command,
+			Workdir:    workdir,
+			Signature:  signature,
+			PromptText: fmt.Sprintf("Approve running %q in %s? [y/N] ", input.Command, workdir),
+			Status:     session.PendingApprovalStatusPending,
+		}
+		e.session.SetPendingShellApproval(pending)
+		return e.pendingApprovalResult(spec, pending)
+	}
+
 	result, execErr := tools.ExecuteShell(ctx, e.runtime, input)
 	fields := map[string]string{
 		"command":   input.Command,
@@ -288,10 +312,14 @@ func (e *Executor) executeShell(ctx context.Context, callID string, spec tools.S
 
 	if execErr != nil {
 		fields["error"] = execErr.Error()
-		return e.failureResult(callID, spec.Name, spec.Source, spec.Capability, fields, execErr)
+		failed := e.failureResult(callID, spec.Name, spec.Source, spec.Capability, fields, execErr)
+		failed.ApprovalReused = true
+		return failed
 	}
 
-	return e.successResult(callID, spec, fields, result.ToolOutput())
+	succeeded := e.successResult(callID, spec, fields, result.ToolOutput())
+	succeeded.ApprovalReused = true
+	return succeeded
 }
 
 func (e *Executor) executeWebFetch(ctx context.Context, callID string, spec tools.Spec, rawArgs string) ToolExecutionResult {
@@ -327,6 +355,18 @@ func (e *Executor) executeWebFetch(ctx context.Context, callID string, spec tool
 
 func (e *Executor) successResult(callID string, spec tools.Spec, fields map[string]string, output string) ToolExecutionResult {
 	return e.buildResult(callID, spec.Name, spec.Source, spec.Capability, ToolExecutionSucceeded, fields, output, "")
+}
+
+func (e *Executor) pendingApprovalResult(spec tools.Spec, pending session.PendingApprovalRequest) ToolExecutionResult {
+	return ToolExecutionResult{
+		ToolCallID:      pending.ToolCallID,
+		ToolName:        spec.Name,
+		Source:          defaultToolSource(spec.Source),
+		Capability:      spec.Capability,
+		Status:          ToolExecutionApprovalRequired,
+		Summary:         ToolExecutionSummary{ToolName: spec.Name, Capability: spec.Capability, Status: ToolExecutionApprovalRequired, Fields: map[string]string{"command": pending.Command, "workdir": pending.Workdir}},
+		PendingApproval: &pending,
+	}
 }
 
 func (e *Executor) approvalRequiredResult(callID string, spec tools.Spec, command string) ToolExecutionResult {
