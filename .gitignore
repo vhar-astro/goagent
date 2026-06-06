@@ -1,0 +1,9 @@
+*.exe
+*.out
+*.test
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db
+goagent
+vendor/
