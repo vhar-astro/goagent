@@ -11,27 +11,66 @@ import (
 
 const slashCommandPrefix = "/"
 
-var slashCommandUsages = []string{
-	"/approve write|shell|web|module",
-	"/attach PATH",
-	"/detach NAME",
-	"/provider NAME",
-	"/tools",
-	"/quit",
+// SlashCommandSpec captures the local slash-command metadata used for parsing and discovery.
+type SlashCommandSpec struct {
+	Name        string
+	Usage       string
+	Description string
 }
 
-var slashCommandUsageByName = map[string]string{
-	"approve":  slashCommandUsages[0],
-	"attach":   slashCommandUsages[1],
-	"detach":   slashCommandUsages[2],
-	"provider": slashCommandUsages[3],
-	"tools":    slashCommandUsages[4],
-	"quit":     slashCommandUsages[5],
+var slashCommandCatalog = []SlashCommandSpec{
+	{
+		Name:        "approve",
+		Usage:       "/approve write|web|module",
+		Description: "Approve one risky non-shell capability for this session.",
+	},
+	{
+		Name:        "attach",
+		Usage:       "/attach PATH",
+		Description: "Attach a local module directory.",
+	},
+	{
+		Name:        "detach",
+		Usage:       "/detach NAME",
+		Description: "Detach an attached module.",
+	},
+	{
+		Name:        "provider",
+		Usage:       "/provider NAME",
+		Description: "Switch the active provider profile.",
+	},
+	{
+		Name:        "tools",
+		Usage:       "/tools",
+		Description: "Show the active built-in and module tools.",
+	},
+	{
+		Name:        "quit",
+		Usage:       "/quit",
+		Description: "Exit the interactive session.",
+	},
+}
+
+var slashCommandCatalogByName = func() map[string]SlashCommandSpec {
+	byName := make(map[string]SlashCommandSpec, len(slashCommandCatalog))
+	for _, spec := range slashCommandCatalog {
+		byName[spec.Name] = spec
+	}
+
+	return byName
+}()
+
+var slashCommandParsers = map[string]func(string, []string) (SlashCommand, error){
+	"approve":  parseApproveCommand,
+	"attach":   parseAttachCommand,
+	"detach":   parseDetachCommand,
+	"provider": parseProviderCommand,
+	"tools":    parseToolsCommand,
+	"quit":     parseQuitCommand,
 }
 
 var approvableCapabilities = map[string]struct{}{
 	tools.CapabilityWrite:  {},
-	tools.CapabilityShell:  {},
 	tools.CapabilityWeb:    {},
 	tools.CapabilityModule: {},
 }
@@ -203,41 +242,47 @@ func ParseSlashCommand(line string) (SlashCommand, error) {
 		return nil, &CommandParseError{
 			Input:   line,
 			Message: err.Error(),
-			Usage:   availableSlashCommands(),
+			Usage:   availableSlashCommandsText(),
 		}
 	}
 	if len(tokens) == 0 {
 		return nil, &CommandParseError{
 			Input:   line,
 			Message: "slash command is empty",
-			Usage:   availableSlashCommands(),
+			Usage:   availableSlashCommandsText(),
 		}
 	}
 
 	name := tokens[0]
 	args := tokens[1:]
 
-	switch name {
-	case "approve":
-		return parseApproveCommand(line, args)
-	case "attach":
-		return parseAttachCommand(line, args)
-	case "detach":
-		return parseDetachCommand(line, args)
-	case "provider":
-		return parseProviderCommand(line, args)
-	case "tools":
-		return parseToolsCommand(line, args)
-	case "quit":
-		return parseQuitCommand(line, args)
-	default:
+	parser, ok := slashCommandParsers[name]
+	if !ok {
 		return nil, &CommandParseError{
 			Command: name,
 			Input:   line,
 			Message: fmt.Sprintf("unknown slash command %q", name),
-			Usage:   availableSlashCommands(),
+			Usage:   availableSlashCommandsText(),
 		}
 	}
+
+	return parser(line, args)
+}
+
+// LookupSlashCommandSpec returns the command catalog entry for one slash command.
+func LookupSlashCommandSpec(name string) (SlashCommandSpec, bool) {
+	spec, ok := slashCommandCatalogByName[name]
+	return spec, ok
+}
+
+// AvailableSlashCommandsText returns the catalog usage summary for user-facing help text.
+func AvailableSlashCommandsText() string {
+	return availableSlashCommandsText()
+}
+
+// SuggestSlashCommands returns prefix-filtered command metadata for slash discovery.
+func SuggestSlashCommands(prefix string) []SlashCommandSpec {
+	return suggestSlashCommands(prefix)
 }
 
 // DispatchParsedInput sends a parsed slash command to the configured handler set.
@@ -446,11 +491,39 @@ func argumentCountError(line, name, want string) error {
 }
 
 func usageFor(name string) string {
-	return slashCommandUsageByName[name]
+	spec, ok := LookupSlashCommandSpec(name)
+	if !ok {
+		return ""
+	}
+
+	return spec.Usage
 }
 
-func availableSlashCommands() string {
-	return strings.Join(slashCommandUsages, ", ")
+func availableSlashCommandsText() string {
+	usages := make([]string, 0, len(slashCommandCatalog))
+	for _, spec := range slashCommandCatalog {
+		usages = append(usages, spec.Usage)
+	}
+
+	return strings.Join(usages, ", ")
+}
+
+func suggestSlashCommands(prefix string) []SlashCommandSpec {
+	query := strings.TrimSpace(prefix)
+	query = strings.TrimPrefix(query, slashCommandPrefix)
+	if cut := strings.IndexFunc(query, unicode.IsSpace); cut >= 0 {
+		query = query[:cut]
+	}
+
+	matches := make([]SlashCommandSpec, 0, len(slashCommandCatalog))
+	for _, spec := range slashCommandCatalog {
+		if query != "" && !strings.HasPrefix(spec.Name, query) {
+			continue
+		}
+		matches = append(matches, spec)
+	}
+
+	return matches
 }
 
 func missingHandlerError(name string) error {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 )
 
@@ -53,6 +54,9 @@ type REPL struct {
 	Out             io.Writer
 	Err             io.Writer
 	Prompt          string
+	reader          *bufio.Reader
+	interactive     *bool
+	slashSuggester  func(string) []string
 	commandExecutor CommandExecutor
 	promptSubmitter PromptSubmitter
 }
@@ -77,6 +81,11 @@ func (r *REPL) SetPrompt(prompt string) {
 	r.Prompt = prompt
 }
 
+// SetInteractive overrides automatic terminal detection for tests and non-tty flows.
+func (r *REPL) SetInteractive(interactive bool) {
+	r.interactive = &interactive
+}
+
 // SetDispatcher wires slash-command handling into the REPL loop.
 func (r *REPL) SetDispatcher(dispatcher *Dispatcher) {
 	r.commandExecutor = dispatcher
@@ -97,9 +106,14 @@ func (r *REPL) SetPromptSubmitter(submitter PromptSubmitter) {
 	r.promptSubmitter = submitter
 }
 
+// SetSlashSuggester wires live slash suggestions for interactive input.
+func (r *REPL) SetSlashSuggester(suggester func(string) []string) {
+	r.slashSuggester = suggester
+}
+
 // Run executes the interactive read/parse/dispatch/stream loop until EOF, /quit, or cancellation.
 func (r *REPL) Run(ctx context.Context) error {
-	reader := bufio.NewReader(readerOrDiscard(r.In))
+	reader := r.inputReader()
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -109,7 +123,7 @@ func (r *REPL) Run(ctx context.Context) error {
 			return err
 		}
 
-		line, err := readLine(reader)
+		line, err := r.readInputLine(reader)
 		switch {
 		case errors.Is(err, io.EOF) && strings.TrimSpace(line) == "":
 			return nil
@@ -131,6 +145,42 @@ func (r *REPL) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// PromptApproval displays a local yes/no prompt and reads one reply from stdin.
+func (r *REPL) PromptApproval(ctx context.Context, prompt string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if _, err := io.WriteString(writerOrDiscard(r.Out), prompt); err != nil {
+		return false, err
+	}
+
+	line, err := readLine(r.inputReader())
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// WriteLocalMessage prints one local CLI-owned message line.
+func (r *REPL) WriteLocalMessage(_ context.Context, message string) error {
+	if strings.TrimSpace(message) == "" {
+		return nil
+	}
+
+	if !strings.HasSuffix(message, "\n") {
+		message += "\n"
+	}
+
+	_, err := io.WriteString(writerOrDiscard(r.Out), message)
+	return err
 }
 
 func (r *REPL) handleLine(ctx context.Context, line string) (stop bool, handled bool, err error) {
@@ -204,6 +254,89 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 	}
 }
 
+func (r *REPL) readInputLine(reader *bufio.Reader) (string, error) {
+	if !r.isInteractive() {
+		return readLine(reader)
+	}
+
+	return r.readInteractiveLine(reader)
+}
+
+func (r *REPL) readInteractiveLine(reader *bufio.Reader) (string, error) {
+	restore, err := r.enterRawMode()
+	if err != nil {
+		return "", err
+	}
+	defer restore()
+
+	var builder strings.Builder
+
+	for {
+		ch, _, err := reader.ReadRune()
+		if err != nil {
+			r.clearInteractiveBlock()
+			return builder.String(), err
+		}
+
+		switch ch {
+		case '\n':
+			r.clearInteractiveBlock()
+			if _, err := io.WriteString(writerOrDiscard(r.Out), "\n"); err != nil {
+				return "", err
+			}
+			return builder.String(), nil
+		case '\r':
+			continue
+		case 0x7f, '\b':
+			text := []rune(builder.String())
+			if len(text) > 0 {
+				builder.Reset()
+				builder.WriteString(string(text[:len(text)-1]))
+			}
+		default:
+			builder.WriteRune(ch)
+		}
+
+		if err := r.renderInteractiveLine(builder.String()); err != nil {
+			return "", err
+		}
+	}
+}
+
+func (r *REPL) renderInteractiveLine(line string) error {
+	out := writerOrDiscard(r.Out)
+	if _, err := io.WriteString(out, "\r\033[2K"+r.Prompt+line+"\033[s\033[J"); err != nil {
+		return err
+	}
+
+	suggestions := r.slashSuggestions(line)
+	for _, suggestion := range suggestions {
+		if _, err := io.WriteString(out, "\n"+suggestion); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(out, "\033[u"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r *REPL) slashSuggestions(line string) []string {
+	if r.slashSuggester == nil {
+		return nil
+	}
+	if !strings.HasPrefix(line, slashCommandPrefix) {
+		return nil
+	}
+
+	return r.slashSuggester(line)
+}
+
+func (r *REPL) clearInteractiveBlock() {
+	_, _ = io.WriteString(writerOrDiscard(r.Out), "\033[s\033[J\033[u")
+}
+
 func (r *REPL) writePrompt() error {
 	_, err := io.WriteString(writerOrDiscard(r.Out), r.Prompt)
 	return err
@@ -222,6 +355,48 @@ func readLine(reader *bufio.Reader) (string, error) {
 	line, err := reader.ReadString('\n')
 	line = strings.TrimRight(line, "\r\n")
 	return line, err
+}
+
+func (r *REPL) inputReader() *bufio.Reader {
+	if r.reader == nil {
+		r.reader = bufio.NewReader(readerOrDiscard(r.In))
+	}
+
+	return r.reader
+}
+
+func (r *REPL) isInteractive() bool {
+	if r.interactive != nil {
+		return *r.interactive
+	}
+
+	file, ok := r.In.(*os.File)
+	if !ok {
+		return false
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func (r *REPL) enterRawMode() (func(), error) {
+	file, ok := r.In.(*os.File)
+	if !ok {
+		return func() {}, nil
+	}
+
+	state, err := makeRawTTY(file)
+	if err != nil {
+		return nil, err
+	}
+
+	return func() {
+		_ = restoreTTY(file, state)
+	}, nil
 }
 
 func isQuitCommand(command SlashCommand) bool {

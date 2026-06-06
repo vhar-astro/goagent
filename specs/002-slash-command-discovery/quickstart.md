@@ -81,3 +81,8 @@ Expected behavior:
 
 - Non-shell approvals remain session-scoped capability approvals.
 - Shell commands continue to use inline exact-command approval prompts.
+
+## Verified Notes
+
+- The repository test suite now exercises interactive slash discovery, inline shell
+  approval, denial handling, and exact-command approval reuse with `go test ./...`.

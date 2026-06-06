@@ -24,8 +24,8 @@
 
 **Purpose**: Create the feature-specific test entry points for interactive CLI and approval flows.
 
-- [ ] T001 Create interactive CLI test scaffolds for typed slash input and rendered local output in `internal/cli/repl_test.go` and `test/integration/slash_command_discovery_test.go`
-- [ ] T002 [P] Create shell-approval test scaffolds for executor and session-runner flows in `internal/app/executor_test.go`, `internal/app/session_runner_test.go`, and `test/integration/shell_approval_prompt_test.go`
+- [X] T001 Create interactive CLI test scaffolds for typed slash input and rendered local output in `internal/cli/repl_test.go` and `test/integration/slash_command_discovery_test.go`
+- [X] T002 [P] Create shell-approval test scaffolds for executor and session-runner flows in `internal/app/executor_test.go`, `internal/app/session_runner_test.go`, and `test/integration/shell_approval_prompt_test.go`
 
 ---
 
@@ -35,9 +35,9 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T003 Refactor interactive input/output hooks for redraws, local prompts, and non-TTY fallback in `internal/cli/repl.go`
-- [ ] T004 [P] Add command-specific shell approval records and pending-request helpers in `internal/session/session.go`
-- [ ] T005 Add baseline coverage for REPL hook behavior and pending approval lifecycle in `internal/cli/repl_test.go` and `internal/session/session_test.go`
+- [X] T003 Refactor interactive input/output hooks for redraws, local prompts, and non-TTY fallback in `internal/cli/repl.go`
+- [X] T004 [P] Add command-specific shell approval records and pending-request helpers in `internal/session/session.go`
+- [X] T005 Add baseline coverage for REPL hook behavior and pending approval lifecycle in `internal/cli/repl_test.go` and `internal/session/session_test.go`
 
 **Checkpoint**: Shared terminal and session primitives are ready for story work.
 
@@ -51,14 +51,14 @@
 
 ### Tests for User Story 1
 
-- [ ] T006 [P] [US1] Add slash-command catalog parsing and prefix-filtering tests in `internal/cli/commands_test.go`
-- [ ] T007 [P] [US1] Add interactive suggestion rendering and non-TTY fallback tests in `internal/cli/repl_test.go` and `test/integration/slash_command_discovery_test.go`
+- [X] T006 [P] [US1] Add slash-command catalog parsing and prefix-filtering tests in `internal/cli/commands_test.go`
+- [X] T007 [P] [US1] Add interactive suggestion rendering and non-TTY fallback tests in `internal/cli/repl_test.go` and `test/integration/slash_command_discovery_test.go`
 
 ### Implementation for User Story 1
 
-- [ ] T008 [US1] Replace static slash-command usage lists with catalog metadata, descriptions, and availability helpers in `internal/cli/commands.go`
-- [ ] T009 [US1] Render, update, and clear prefix-filtered slash suggestions during interactive input in `internal/cli/repl.go`
-- [ ] T010 [US1] Wire catalog-backed slash discovery into the live session bootstrap in `internal/app/app.go`
+- [X] T008 [US1] Replace static slash-command usage lists with catalog metadata, descriptions, and availability helpers in `internal/cli/commands.go`
+- [X] T009 [US1] Render, update, and clear prefix-filtered slash suggestions during interactive input in `internal/cli/repl.go`
+- [X] T010 [US1] Wire catalog-backed slash discovery into the live session bootstrap in `internal/app/app.go`
 
 **Checkpoint**: User Story 1 should now make slash commands discoverable in the terminal without changing non-slash prompt behavior.
 
@@ -72,14 +72,14 @@
 
 ### Tests for User Story 2
 
-- [ ] T011 [P] [US2] Add executor tests for approval-required `run_shell` calls and denial outcomes in `internal/app/executor_test.go`
-- [ ] T012 [P] [US2] Add session-runner and integration coverage for inline shell approval and same-turn resume in `internal/app/session_runner_test.go` and `test/integration/shell_approval_prompt_test.go`
+- [X] T011 [P] [US2] Add executor tests for approval-required `run_shell` calls and denial outcomes in `internal/app/executor_test.go`
+- [X] T012 [P] [US2] Add session-runner and integration coverage for inline shell approval and same-turn resume in `internal/app/session_runner_test.go` and `test/integration/shell_approval_prompt_test.go`
 
 ### Implementation for User Story 2
 
-- [ ] T013 [US2] Move shell approval checks into decoded `run_shell` execution and emit pending approval requests in `internal/app/executor.go`
-- [ ] T014 [US2] Implement local `Approve running "<command>" in <workdir>? [y/N]` prompting and resumed execution in `internal/app/session_runner.go` and `internal/cli/repl.go`
-- [ ] T015 [US2] Remove shell from `/approve` parsing, usage text, and handler messaging in `internal/cli/commands.go` and `internal/app/app.go`
+- [X] T013 [US2] Move shell approval checks into decoded `run_shell` execution and emit pending approval requests in `internal/app/executor.go`
+- [X] T014 [US2] Implement local `Approve running "<command>" in <workdir>? [y/N]` prompting and resumed execution in `internal/app/session_runner.go` and `internal/cli/repl.go`
+- [X] T015 [US2] Remove shell from `/approve` parsing, usage text, and handler messaging in `internal/cli/commands.go` and `internal/app/app.go`
 
 **Checkpoint**: User Story 2 should now prompt for one pending shell command inline and continue without a manual retry step.
 
@@ -93,15 +93,15 @@
 
 ### Tests for User Story 3
 
-- [ ] T016 [P] [US3] Add session tests for exact-command approval reuse, changed arguments, and changed workdir behavior in `internal/session/session_test.go`
-- [ ] T017 [P] [US3] Add executor tests for exact approval-signature matching and prompt reuse suppression in `internal/app/executor_test.go`
-- [ ] T018 [P] [US3] Add integration coverage for approval reuse versus fresh prompts in `test/integration/shell_approval_cache_test.go`
+- [X] T016 [P] [US3] Add session tests for exact-command approval reuse, changed arguments, and changed workdir behavior in `internal/session/session_test.go`
+- [X] T017 [P] [US3] Add executor tests for exact approval-signature matching and prompt reuse suppression in `internal/app/executor_test.go`
+- [X] T018 [P] [US3] Add integration coverage for approval reuse versus fresh prompts in `test/integration/shell_approval_cache_test.go`
 
 ### Implementation for User Story 3
 
-- [ ] T019 [US3] Persist approved exact shell command signatures and pending-request transitions in `internal/session/session.go`
-- [ ] T020 [US3] Derive shell approval signatures from command text plus resolved workdir and reuse only exact matches in `internal/app/executor.go` and `internal/tools/shell.go`
-- [ ] T021 [US3] Print explicit approve, deny, and reused-approval outcomes while clearing pending state in `internal/app/session_runner.go` and `internal/app/app.go`
+- [X] T019 [US3] Persist approved exact shell command signatures and pending-request transitions in `internal/session/session.go`
+- [X] T020 [US3] Derive shell approval signatures from command text plus resolved workdir and reuse only exact matches in `internal/app/executor.go` and `internal/tools/shell.go`
+- [X] T021 [US3] Print explicit approve, deny, and reused-approval outcomes while clearing pending state in `internal/app/session_runner.go` and `internal/app/app.go`
 
 **Checkpoint**: User Story 3 should now enforce narrow approval scope without regressing the inline approval flow.
 
@@ -111,9 +111,9 @@
 
 **Purpose**: Finalize shared messaging, docs, and end-to-end validation across all stories.
 
-- [ ] T022 [P] Align CLI contract text and quickstart examples with the final slash discovery and inline shell approval behavior in `specs/002-slash-command-discovery/contracts/cli.md` and `specs/002-slash-command-discovery/quickstart.md`
-- [ ] T023 Normalize approval, denial, and unknown-command user-facing messages across `internal/cli/commands.go`, `internal/app/app.go`, and `internal/app/session_runner.go`
-- [ ] T024 Validate the end-to-end feature scenarios with `go test ./...` and update verified behavior notes in `specs/002-slash-command-discovery/contracts/cli.md` and `specs/002-slash-command-discovery/quickstart.md`
+- [X] T022 [P] Align CLI contract text and quickstart examples with the final slash discovery and inline shell approval behavior in `specs/002-slash-command-discovery/contracts/cli.md` and `specs/002-slash-command-discovery/quickstart.md`
+- [X] T023 Normalize approval, denial, and unknown-command user-facing messages across `internal/cli/commands.go`, `internal/app/app.go`, and `internal/app/session_runner.go`
+- [X] T024 Validate the end-to-end feature scenarios with `go test ./...` and update verified behavior notes in `specs/002-slash-command-discovery/contracts/cli.md` and `specs/002-slash-command-discovery/quickstart.md`
 
 ---
 

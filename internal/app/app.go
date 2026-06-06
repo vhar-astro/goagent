@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -146,9 +147,18 @@ func Bootstrap(options BootstrapOptions) (*App, error) {
 		terminalOut,
 		terminalErr,
 	)
+	application.repl.SetSlashSuggester(func(line string) []string {
+		matches := cli.SuggestSlashCommands(line)
+		suggestions := make([]string, 0, len(matches))
+		for _, match := range matches {
+			suggestions = append(suggestions, match.Usage+" - "+match.Description)
+		}
+		return suggestions
+	})
 	application.repl.SetPromptSubmitter(&sessionPromptSubmitter{
 		session: application.session,
 		runtime: runtime,
+		repl:    application.repl,
 		stream:  cfg.Streaming,
 		clientFactory: func() (provider.Client, error) {
 			return newProviderClient(profile)
@@ -260,6 +270,7 @@ func newBaseCommandHandlers(sess *session.Session, out io.Writer) cli.CommandHan
 type sessionPromptSubmitter struct {
 	session       *session.Session
 	runtime       Runtime
+	repl          *cli.REPL
 	stream        bool
 	clientFactory func() (provider.Client, error)
 
@@ -281,6 +292,28 @@ func (s *sessionPromptSubmitter) SubmitPrompt(ctx context.Context, prompt string
 		Stream:  s.stream,
 		WriteAssistantChunk: func(ctx context.Context, chunk string) error {
 			return stream.Send(ctx, chunk)
+		},
+		WriteToolResult: func(ctx context.Context, event ToolExecutionEvent) error {
+			if s.repl == nil {
+				return nil
+			}
+			status := "ok"
+			if event.Failed {
+				status = "error"
+			}
+			return s.repl.WriteLocalMessage(ctx, fmt.Sprintf("tool=%s status=%s capability=%s", event.ToolName, status, event.Capability))
+		},
+		RequestShellApproval: func(ctx context.Context, pending session.PendingApprovalRequest) (bool, error) {
+			if s.repl == nil {
+				return false, errors.New("repl is not configured")
+			}
+			return s.repl.PromptApproval(ctx, pending.PromptText)
+		},
+		WriteLocalMessage: func(ctx context.Context, message string) error {
+			if s.repl == nil {
+				return nil
+			}
+			return s.repl.WriteLocalMessage(ctx, message)
 		},
 	})
 	if err != nil {

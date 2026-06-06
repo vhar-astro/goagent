@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vhar-astro/goagent/internal/provider"
 	"github.com/vhar-astro/goagent/internal/session"
@@ -28,6 +30,12 @@ type AssistantChunkWriterFunc func(context.Context, string) error
 // ToolResultWriterFunc consumes normalized tool execution summaries.
 type ToolResultWriterFunc func(context.Context, ToolExecutionEvent) error
 
+// ShellApprovalPromptFunc asks the user to approve one pending shell command.
+type ShellApprovalPromptFunc func(context.Context, session.PendingApprovalRequest) (bool, error)
+
+// LocalMessageWriterFunc prints one CLI-owned local message.
+type LocalMessageWriterFunc func(context.Context, string) error
+
 // ToolExecutionEvent captures one executed tool call and its reinjected payload.
 type ToolExecutionEvent struct {
 	ToolCallID string
@@ -40,28 +48,32 @@ type ToolExecutionEvent struct {
 
 // SessionRunnerOptions configures one in-memory conversation loop.
 type SessionRunnerOptions struct {
-	Session             *session.Session
-	Client              provider.Client
-	Runtime             *Runtime
-	ReadInput           SessionInputFunc
-	WriteAssistantChunk AssistantChunkWriterFunc
-	WriteToolResult     ToolResultWriterFunc
-	SystemPrompt        string
-	Stream              bool
+	Session              *session.Session
+	Client               provider.Client
+	Runtime              *Runtime
+	ReadInput            SessionInputFunc
+	WriteAssistantChunk  AssistantChunkWriterFunc
+	WriteToolResult      ToolResultWriterFunc
+	RequestShellApproval ShellApprovalPromptFunc
+	WriteLocalMessage    LocalMessageWriterFunc
+	SystemPrompt         string
+	Stream               bool
 }
 
 // SessionRunner coordinates user turns, provider streaming, and tool execution.
 type SessionRunner struct {
-	session             *session.Session
-	client              provider.Client
-	runtime             Runtime
-	executor            *Executor
-	readInput           SessionInputFunc
-	writeAssistantChunk AssistantChunkWriterFunc
-	writeToolResult     ToolResultWriterFunc
-	systemPrompt        string
-	stream              bool
-	transcript          []provider.Message
+	session              *session.Session
+	client               provider.Client
+	runtime              Runtime
+	executor             *Executor
+	readInput            SessionInputFunc
+	writeAssistantChunk  AssistantChunkWriterFunc
+	writeToolResult      ToolResultWriterFunc
+	requestShellApproval ShellApprovalPromptFunc
+	writeLocalMessage    LocalMessageWriterFunc
+	systemPrompt         string
+	stream               bool
+	transcript           []provider.Message
 }
 
 // NewSessionRunner constructs a session runner around the normalized runtime types.
@@ -93,16 +105,18 @@ func NewSessionRunner(options SessionRunnerOptions) (*SessionRunner, error) {
 	}
 
 	runner := &SessionRunner{
-		session:             options.Session,
-		client:              options.Client,
-		runtime:             *runtime,
-		executor:            executor,
-		readInput:           options.ReadInput,
-		writeAssistantChunk: options.WriteAssistantChunk,
-		writeToolResult:     options.WriteToolResult,
-		systemPrompt:        systemPrompt,
-		stream:              true,
-		transcript:          make([]provider.Message, 0, len(options.Session.Messages)),
+		session:              options.Session,
+		client:               options.Client,
+		runtime:              *runtime,
+		executor:             executor,
+		readInput:            options.ReadInput,
+		writeAssistantChunk:  options.WriteAssistantChunk,
+		writeToolResult:      options.WriteToolResult,
+		requestShellApproval: options.RequestShellApproval,
+		writeLocalMessage:    options.WriteLocalMessage,
+		systemPrompt:         systemPrompt,
+		stream:               true,
+		transcript:           make([]provider.Message, 0, len(options.Session.Messages)),
 	}
 	if !options.Stream {
 		runner.stream = false
@@ -300,14 +314,24 @@ func (r *SessionRunner) collectAssistantResponse(ctx context.Context, events <-c
 }
 
 func (r *SessionRunner) executeToolCalls(ctx context.Context, calls []provider.ToolCall) ([]provider.Message, error) {
-	results, err := r.executor.ExecuteCalls(ctx, calls)
-	if err != nil {
-		return nil, err
-	}
+	messages := make([]provider.Message, 0, len(calls))
+	for _, call := range calls {
+		result, err := r.executor.Execute(ctx, call)
+		if err != nil {
+			return nil, err
+		}
 
-	messages := make([]provider.Message, 0, len(results))
-	for _, result := range results {
+		if result.RequiresApproval() {
+			result, err = r.handleApprovalRequired(ctx, call, result)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		if err := r.emitToolResult(ctx, result.Event()); err != nil {
+			return nil, err
+		}
+		if err := r.emitShellApprovalOutcome(ctx, result); err != nil {
 			return nil, err
 		}
 
@@ -320,6 +344,84 @@ func (r *SessionRunner) executeToolCalls(ctx context.Context, calls []provider.T
 	}
 
 	return messages, nil
+}
+
+func (r *SessionRunner) handleApprovalRequired(ctx context.Context, call provider.ToolCall, result ToolExecutionResult) (ToolExecutionResult, error) {
+	if result.PendingApproval == nil {
+		return result, nil
+	}
+	if r.requestShellApproval == nil {
+		return ToolExecutionResult{}, errors.New("shell approval prompt is not configured")
+	}
+
+	approved, err := r.requestShellApproval(ctx, *result.PendingApproval)
+	if err != nil {
+		return ToolExecutionResult{}, err
+	}
+	if approved {
+		if _, ok := r.session.ApprovePendingShellApproval(time.Time{}); !ok {
+			return ToolExecutionResult{}, errors.New("pending shell approval disappeared before approval")
+		}
+		pending, _ := r.session.PendingApproval()
+		if r.writeLocalMessage != nil {
+			if err := r.writeLocalMessage(ctx, "approved shell command "+strconv.Quote(pending.Command)+" in "+pending.Workdir); err != nil {
+				return ToolExecutionResult{}, err
+			}
+		}
+		r.session.ClearPendingShellApproval()
+		executed, err := r.executor.Execute(ctx, call)
+		if err != nil {
+			return ToolExecutionResult{}, err
+		}
+		executed.ApprovalReused = false
+		return executed, nil
+	}
+
+	r.session.DenyPendingShellApproval()
+	pending, _ := r.session.PendingApproval()
+	if r.writeLocalMessage != nil {
+		if err := r.writeLocalMessage(ctx, "denied shell command "+strconv.Quote(pending.Command)+" in "+pending.Workdir); err != nil {
+			return ToolExecutionResult{}, err
+		}
+	}
+	r.session.ClearPendingShellApproval()
+
+	return ToolExecutionResult{
+		ToolCallID: call.ID,
+		ToolName:   call.Name,
+		Source:     tools.SourceBuiltin,
+		Capability: tools.CapabilityShell,
+		Status:     ToolExecutionFailed,
+		Summary: ToolExecutionSummary{
+			ToolName:   call.Name,
+			Capability: tools.CapabilityShell,
+			Status:     ToolExecutionFailed,
+			Fields: map[string]string{
+				"command": pending.Command,
+				"workdir": pending.Workdir,
+				"error":   "shell command denied by user",
+			},
+		},
+		Output: formatErrorOutput(errors.New("shell command denied by user")),
+	}, nil
+}
+
+func (r *SessionRunner) emitShellApprovalOutcome(ctx context.Context, result ToolExecutionResult) error {
+	if r.writeLocalMessage == nil || result.ToolName != tools.ToolNameRunShell {
+		return nil
+	}
+
+	switch {
+	case result.Status == ToolExecutionSucceeded && result.ApprovalReused:
+		command := result.Summary.Fields["command"]
+		workdir := result.Summary.Fields["workdir"]
+		if command == "" || workdir == "" {
+			return nil
+		}
+		return r.writeLocalMessage(ctx, "reused shell approval for "+strconv.Quote(command)+" in "+workdir)
+	default:
+		return nil
+	}
 }
 
 func (r *SessionRunner) appendAssistantSummary(message provider.Message) error {

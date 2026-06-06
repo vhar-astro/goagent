@@ -73,3 +73,9 @@ Approve running "<command>" in <workdir>? [y/N]
 - Denied shell approval: do not execute the command; report the denial and
   continue the session.
 - Out-of-workspace shell request: reject the action and explain the boundary.
+
+## Verified Behavior Notes
+
+- Package tests cover slash-command catalog parsing, interactive suggestion rendering,
+  inline shell approval prompts, same-turn resume after approval, and exact-command
+  approval reuse boundaries.

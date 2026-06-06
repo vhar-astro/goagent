@@ -79,7 +79,7 @@ func ExecuteShell(ctx context.Context, runtime shellRuntime, input ShellInput) (
 		return ShellResult{}, ErrShellCommandRequired
 	}
 
-	workdir, err := resolveShellWorkdir(runtime, input.Workdir)
+	workdir, err := ResolveShellWorkdir(runtime, input.Workdir)
 	if err != nil {
 		return ShellResult{}, err
 	}
@@ -151,7 +151,8 @@ func (r ShellResult) withExitCode(exitCode int) ShellResult {
 	return r
 }
 
-func resolveShellWorkdir(runtime shellRuntime, requested string) (string, error) {
+// ResolveShellWorkdir validates and resolves one shell workdir inside the workspace.
+func ResolveShellWorkdir(runtime shellRuntime, requested string) (string, error) {
 	workdir := requested
 	if strings.TrimSpace(workdir) == "" {
 		workdir = "."
@@ -174,6 +175,11 @@ func resolveShellWorkdir(runtime shellRuntime, requested string) (string, error)
 	}
 
 	return resolved, nil
+}
+
+// ShellApprovalSignature scopes one approval to exact command text in one resolved workdir.
+func ShellApprovalSignature(command, workdir string) string {
+	return strings.TrimSpace(command) + "\x00" + strings.TrimSpace(workdir)
 }
 
 func decodeJSONArguments(raw string, target any) error {
