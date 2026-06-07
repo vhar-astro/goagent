@@ -27,6 +27,21 @@ type AssistantChunk struct {
 	Text string
 }
 
+type promptHistoryEntry struct {
+	line     string
+	sequence int
+	kind     string
+}
+
+type promptHistoryState struct {
+	entries         []promptHistoryEntry
+	cursor          int
+	navigating      bool
+	preservedDraft  string
+	visibleLine     string
+	visibleFromLive bool
+}
+
 // PromptSubmitter turns one natural-language REPL line into a streamed response.
 type PromptSubmitter interface {
 	SubmitPrompt(context.Context, string) (AssistantStream, error)
@@ -59,6 +74,7 @@ type REPL struct {
 	slashSuggester  func(string) []string
 	commandExecutor CommandExecutor
 	promptSubmitter PromptSubmitter
+	promptHistory   promptHistoryState
 }
 
 // NewREPL builds the minimal terminal shell for a single interactive launch.
@@ -109,6 +125,72 @@ func (r *REPL) SetPromptSubmitter(submitter PromptSubmitter) {
 // SetSlashSuggester wires live slash suggestions for interactive input.
 func (r *REPL) SetSlashSuggester(suggester func(string) []string) {
 	r.slashSuggester = suggester
+}
+
+func (r *REPL) recordPromptHistoryLine(line string) {
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+
+	entry := promptHistoryEntry{
+		line:     line,
+		sequence: len(r.promptHistory.entries),
+		kind:     "prompt",
+	}
+	if strings.HasPrefix(strings.TrimSpace(line), slashCommandPrefix) {
+		entry.kind = "slash"
+	}
+
+	r.promptHistory.entries = append(r.promptHistory.entries, entry)
+	r.resetPromptHistoryNavigation("")
+}
+
+func (r *REPL) resetPromptHistoryNavigation(line string) {
+	r.promptHistory.cursor = len(r.promptHistory.entries)
+	r.promptHistory.navigating = false
+	r.promptHistory.preservedDraft = ""
+	r.promptHistory.visibleLine = line
+	r.promptHistory.visibleFromLive = true
+}
+
+func (r *REPL) promptHistoryOlder(currentLine string) (string, bool) {
+	if len(r.promptHistory.entries) == 0 {
+		return currentLine, false
+	}
+
+	if !r.promptHistory.navigating {
+		r.promptHistory.preservedDraft = currentLine
+		r.promptHistory.cursor = len(r.promptHistory.entries) - 1
+	} else if r.promptHistory.cursor > 0 {
+		r.promptHistory.cursor--
+	}
+
+	r.promptHistory.navigating = true
+	line := r.promptHistory.entries[r.promptHistory.cursor].line
+	r.setPromptHistoryVisibleLine(line, false)
+	return line, true
+}
+
+func (r *REPL) promptHistoryNewer() (string, bool) {
+	if !r.promptHistory.navigating || len(r.promptHistory.entries) == 0 {
+		return r.promptHistory.visibleLine, false
+	}
+
+	if r.promptHistory.cursor < len(r.promptHistory.entries)-1 {
+		r.promptHistory.cursor++
+		line := r.promptHistory.entries[r.promptHistory.cursor].line
+		r.setPromptHistoryVisibleLine(line, false)
+		return line, true
+	}
+
+	line := r.promptHistory.preservedDraft
+	r.resetPromptHistoryNavigation(line)
+	return line, true
+}
+
+func (r *REPL) setPromptHistoryVisibleLine(line string, fromLive bool) {
+	r.promptHistory.visibleLine = line
+	r.promptHistory.visibleFromLive = fromLive
 }
 
 // Run executes the interactive read/parse/dispatch/stream loop until EOF, /quit, or cancellation.
@@ -184,6 +266,10 @@ func (r *REPL) WriteLocalMessage(_ context.Context, message string) error {
 }
 
 func (r *REPL) handleLine(ctx context.Context, line string) (stop bool, handled bool, err error) {
+	if r.isInteractive() {
+		r.recordPromptHistoryLine(line)
+	}
+
 	parsed, err := ParseInput(line)
 	if err != nil {
 		return false, false, err
@@ -269,13 +355,14 @@ func (r *REPL) readInteractiveLine(reader *bufio.Reader) (string, error) {
 	}
 	defer restore()
 
-	var builder strings.Builder
+	line := ""
+	r.setPromptHistoryVisibleLine(line, true)
 
 	for {
 		ch, _, err := reader.ReadRune()
 		if err != nil {
 			r.clearInteractiveBlock()
-			return builder.String(), err
+			return line, err
 		}
 
 		switch ch {
@@ -284,22 +371,58 @@ func (r *REPL) readInteractiveLine(reader *bufio.Reader) (string, error) {
 			if _, err := io.WriteString(writerOrDiscard(r.Out), "\n"); err != nil {
 				return "", err
 			}
-			return builder.String(), nil
+			return line, nil
 		case '\r':
 			continue
-		case 0x7f, '\b':
-			text := []rune(builder.String())
-			if len(text) > 0 {
-				builder.Reset()
-				builder.WriteString(string(text[:len(text)-1]))
+		case 0x1b:
+			updatedLine, handled, err := r.readInteractiveEscapeSequence(reader, line)
+			if err != nil {
+				return "", err
 			}
+			if !handled {
+				continue
+			}
+			line = updatedLine
+		case 0x7f, '\b':
+			text := []rune(line)
+			if len(text) > 0 {
+				line = string(text[:len(text)-1])
+			}
+			r.setPromptHistoryVisibleLine(line, true)
 		default:
-			builder.WriteRune(ch)
+			line += string(ch)
+			r.setPromptHistoryVisibleLine(line, true)
 		}
 
-		if err := r.renderInteractiveLine(builder.String()); err != nil {
+		if err := r.renderInteractiveLine(line); err != nil {
 			return "", err
 		}
+	}
+}
+
+func (r *REPL) readInteractiveEscapeSequence(reader *bufio.Reader, currentLine string) (string, bool, error) {
+	next, _, err := reader.ReadRune()
+	if err != nil {
+		return "", false, err
+	}
+	if next != '[' {
+		return currentLine, false, nil
+	}
+
+	code, _, err := reader.ReadRune()
+	if err != nil {
+		return "", false, err
+	}
+
+	switch code {
+	case 'A':
+		line, changed := r.promptHistoryOlder(currentLine)
+		return line, changed, nil
+	case 'B':
+		line, changed := r.promptHistoryNewer()
+		return line, changed, nil
+	default:
+		return currentLine, false, nil
 	}
 }
 
