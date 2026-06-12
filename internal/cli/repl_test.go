@@ -60,6 +60,21 @@ func (fixedAssistantStream) Recv(context.Context) (AssistantChunk, error) {
 	return AssistantChunk{}, io.EOF
 }
 
+type sliceAssistantStream struct {
+	chunks []AssistantChunk
+	index  int
+}
+
+func (s *sliceAssistantStream) Recv(context.Context) (AssistantChunk, error) {
+	if s.index >= len(s.chunks) {
+		return AssistantChunk{}, io.EOF
+	}
+
+	chunk := s.chunks[s.index]
+	s.index++
+	return chunk, nil
+}
+
 func TestREPLInteractiveSlashSuggestions(t *testing.T) {
 	t.Parallel()
 
@@ -374,4 +389,35 @@ func TestREPLPromptHistoryBackspaceEditsRecalledLongLine(t *testing.T) {
 		t.Fatalf("submitted prompts = %q, want %q", got, want)
 	}
 	assertInteractiveLineRendered(t, out.String(), repl.Prompt, wantEdited)
+}
+
+func TestREPLPrintsTokenUsageAfterAssistantStream(t *testing.T) {
+	t.Parallel()
+
+	var (
+		out    bytes.Buffer
+		errOut bytes.Buffer
+	)
+
+	repl := NewREPL(strings.NewReader("hello\n"), &out, &errOut)
+	repl.SetInteractive(false)
+	repl.SetPromptSubmitter(PromptSubmitterFunc(func(_ context.Context, prompt string) (AssistantStream, error) {
+		if prompt != "hello" {
+			t.Fatalf("prompt = %q, want hello", prompt)
+		}
+
+		return &sliceAssistantStream{chunks: []AssistantChunk{
+			{Text: "assistant reply"},
+			{Usage: &TokenUsage{InputTokens: 120, OutputTokens: 45, TotalTokens: 165}},
+		}}, nil
+	}))
+
+	if err := repl.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	assertOutputContainsInOrder(t, out.String(),
+		"> assistant reply\n",
+		"[Tokens: 120 input, 45 output]\n",
+	)
 }

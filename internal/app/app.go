@@ -321,7 +321,15 @@ func (s *sessionPromptSubmitter) SubmitPrompt(ctx context.Context, prompt string
 	}
 
 	go func() {
-		stream.Finish(runner.RunTurn(ctx, prompt))
+		err := runner.RunTurn(ctx, prompt)
+		if err == nil {
+			stream.SendUsage(ctx, cli.TokenUsage{
+				InputTokens:  runner.LastTurnUsage().PromptTokens,
+				OutputTokens: runner.LastTurnUsage().CompletionTokens,
+				TotalTokens:  runner.LastTurnUsage().TotalTokens,
+			})
+		}
+		stream.Finish(err)
 	}()
 
 	return stream, nil
@@ -385,6 +393,19 @@ func (s *assistantChunkStream) Send(ctx context.Context, chunk string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case s.items <- assistantChunkItem{chunk: cli.AssistantChunk{Text: chunk}}:
+		return nil
+	}
+}
+
+func (s *assistantChunkStream) SendUsage(ctx context.Context, usage cli.TokenUsage) error {
+	if usage.InputTokens <= 0 && usage.OutputTokens <= 0 && usage.TotalTokens <= 0 {
+		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case s.items <- assistantChunkItem{chunk: cli.AssistantChunk{Usage: &usage}}:
 		return nil
 	}
 }

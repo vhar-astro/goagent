@@ -74,6 +74,7 @@ type SessionRunner struct {
 	systemPrompt         string
 	stream               bool
 	transcript           []provider.Message
+	lastTurnUsage        provider.Usage
 }
 
 // NewSessionRunner constructs a session runner around the normalized runtime types.
@@ -165,6 +166,8 @@ func (r *SessionRunner) RunTurn(ctx context.Context, input string) error {
 		return nil
 	}
 
+	r.lastTurnUsage = provider.Usage{}
+
 	userMessage := provider.Message{
 		Role:    provider.RoleUser,
 		Content: text,
@@ -182,6 +185,7 @@ func (r *SessionRunner) RunTurn(ctx context.Context, input string) error {
 		if err != nil {
 			return err
 		}
+		r.lastTurnUsage = addUsage(r.lastTurnUsage, response.Usage)
 
 		if response.Message.Role == "" {
 			response.Message.Role = provider.RoleAssistant
@@ -202,6 +206,11 @@ func (r *SessionRunner) RunTurn(ctx context.Context, input string) error {
 		}
 		r.transcript = append(r.transcript, toolMessages...)
 	}
+}
+
+// LastTurnUsage returns the aggregated token usage from the most recent turn.
+func (r *SessionRunner) LastTurnUsage() provider.Usage {
+	return *cloneUsage(&r.lastTurnUsage)
 }
 
 func (r *SessionRunner) requestAssistantTurn(ctx context.Context) (provider.Response, error) {
@@ -518,6 +527,32 @@ func cloneUsage(usage *provider.Usage) *provider.Usage {
 	}
 
 	return &cloned
+}
+
+func addUsage(total, next provider.Usage) provider.Usage {
+	total.PromptTokens += next.PromptTokens
+	total.CompletionTokens += next.CompletionTokens
+	total.TotalTokens += next.TotalTokens
+
+	if next.PromptTokenDetails != nil {
+		if total.PromptTokenDetails == nil {
+			total.PromptTokenDetails = &provider.PromptTokenDetails{}
+		}
+		total.PromptTokenDetails.CachedTokens += next.PromptTokenDetails.CachedTokens
+		total.PromptTokenDetails.AudioTokens += next.PromptTokenDetails.AudioTokens
+	}
+
+	if next.CompletionDetails != nil {
+		if total.CompletionDetails == nil {
+			total.CompletionDetails = &provider.CompletionTokenDetails{}
+		}
+		total.CompletionDetails.ReasoningTokens += next.CompletionDetails.ReasoningTokens
+		total.CompletionDetails.AudioTokens += next.CompletionDetails.AudioTokens
+		total.CompletionDetails.AcceptedPredictionTokens += next.CompletionDetails.AcceptedPredictionTokens
+		total.CompletionDetails.RejectedPredictionTokens += next.CompletionDetails.RejectedPredictionTokens
+	}
+
+	return total
 }
 
 func summarizeToolCalls(calls []provider.ToolCall) string {

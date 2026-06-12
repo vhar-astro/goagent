@@ -24,7 +24,15 @@ type AssistantStream interface {
 
 // AssistantChunk carries one streamed assistant text fragment.
 type AssistantChunk struct {
-	Text string
+	Text  string
+	Usage *TokenUsage
+}
+
+// TokenUsage carries normalized prompt/completion token counts for one turn.
+type TokenUsage struct {
+	InputTokens  int
+	OutputTokens int
+	TotalTokens  int
 }
 
 type promptHistoryEntry struct {
@@ -310,6 +318,7 @@ func (r *REPL) handleLine(ctx context.Context, line string) (stop bool, handled 
 func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream) error {
 	wroteText := false
 	endedWithNewline := false
+	var usage *TokenUsage
 
 	for {
 		chunk, err := stream.Recv(ctx)
@@ -317,6 +326,11 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 			if wroteText && !endedWithNewline {
 				if _, writeErr := io.WriteString(writerOrDiscard(r.Out), "\n"); writeErr != nil {
 					return writeErr
+				}
+			}
+			if usage != nil {
+				if err := r.WriteLocalMessage(ctx, formatTokenUsageSummary(*usage)); err != nil {
+					return err
 				}
 			}
 			return nil
@@ -329,6 +343,9 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 			}
 			return err
 		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
 		if chunk.Text == "" {
 			continue
 		}
@@ -338,6 +355,14 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 		wroteText = true
 		endedWithNewline = strings.HasSuffix(chunk.Text, "\n")
 	}
+}
+
+func formatTokenUsageSummary(usage TokenUsage) string {
+	if usage.InputTokens <= 0 && usage.OutputTokens <= 0 && usage.TotalTokens <= 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("[Tokens: %d input, %d output]", usage.InputTokens, usage.OutputTokens)
 }
 
 func (r *REPL) readInputLine(reader *bufio.Reader) (string, error) {
