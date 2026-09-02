@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 const defaultPrompt = "> "
@@ -83,6 +84,39 @@ type REPL struct {
 	commandExecutor CommandExecutor
 	promptSubmitter PromptSubmitter
 	promptHistory   promptHistoryState
+	historyMu       sync.Mutex
+
+	outputMu             sync.Mutex
+	statusLine           string
+	footer               terminalFooter
+	terminalSizeProvider terminalSizeProvider
+	resizeStop           chan struct{}
+	resizeDone           chan struct{}
+	resizeStopSignals    func()
+	resizeNotifier       func() (<-chan os.Signal, func())
+	terminalOutputErr    error
+	runCancel            context.CancelCauseFunc
+	readingInteractive   bool
+	activeApproval       string
+	activeApprovalInput  string
+	activeStreamLine     string
+}
+
+type terminalFooter struct {
+	active  bool
+	enabled bool
+	size    terminalSize
+}
+
+type replOutputWriter struct {
+	repl *REPL
+}
+
+func (w replOutputWriter) Write(data []byte) (int, error) {
+	if err := w.repl.writeContent(string(data)); err != nil {
+		return 0, err
+	}
+	return len(data), nil
 }
 
 // NewREPL builds the minimal terminal shell for a single interactive launch.
@@ -135,10 +169,18 @@ func (r *REPL) SetSlashSuggester(suggester func(string) []string) {
 	r.slashSuggester = suggester
 }
 
+// OutputWriter returns a writer coordinated with interactive footer redraws.
+// Command handlers use it so their output cannot interleave with a resize.
+func (r *REPL) OutputWriter() io.Writer {
+	return replOutputWriter{repl: r}
+}
+
 func (r *REPL) recordPromptHistoryLine(line string) {
 	if strings.TrimSpace(line) == "" {
 		return
 	}
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
 
 	entry := promptHistoryEntry{
 		line:     line,
@@ -150,10 +192,16 @@ func (r *REPL) recordPromptHistoryLine(line string) {
 	}
 
 	r.promptHistory.entries = append(r.promptHistory.entries, entry)
-	r.resetPromptHistoryNavigation("")
+	r.resetPromptHistoryNavigationLocked("")
 }
 
 func (r *REPL) resetPromptHistoryNavigation(line string) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
+	r.resetPromptHistoryNavigationLocked(line)
+}
+
+func (r *REPL) resetPromptHistoryNavigationLocked(line string) {
 	r.promptHistory.cursor = len(r.promptHistory.entries)
 	r.promptHistory.navigating = false
 	r.promptHistory.preservedDraft = ""
@@ -162,6 +210,8 @@ func (r *REPL) resetPromptHistoryNavigation(line string) {
 }
 
 func (r *REPL) promptHistoryOlder(currentLine string) (string, bool) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
 	if len(r.promptHistory.entries) == 0 {
 		return currentLine, false
 	}
@@ -175,11 +225,13 @@ func (r *REPL) promptHistoryOlder(currentLine string) (string, bool) {
 
 	r.promptHistory.navigating = true
 	line := r.promptHistory.entries[r.promptHistory.cursor].line
-	r.setPromptHistoryVisibleLine(line, false)
+	r.setPromptHistoryVisibleLineLocked(line, false)
 	return line, true
 }
 
 func (r *REPL) promptHistoryNewer() (string, bool) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
 	if !r.promptHistory.navigating || len(r.promptHistory.entries) == 0 {
 		return r.promptHistory.visibleLine, false
 	}
@@ -187,25 +239,58 @@ func (r *REPL) promptHistoryNewer() (string, bool) {
 	if r.promptHistory.cursor < len(r.promptHistory.entries)-1 {
 		r.promptHistory.cursor++
 		line := r.promptHistory.entries[r.promptHistory.cursor].line
-		r.setPromptHistoryVisibleLine(line, false)
+		r.setPromptHistoryVisibleLineLocked(line, false)
 		return line, true
 	}
 
 	line := r.promptHistory.preservedDraft
-	r.resetPromptHistoryNavigation(line)
+	r.resetPromptHistoryNavigationLocked(line)
 	return line, true
 }
 
 func (r *REPL) setPromptHistoryVisibleLine(line string, fromLive bool) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
+	r.setPromptHistoryVisibleLineLocked(line, fromLive)
+}
+
+func (r *REPL) setPromptHistoryVisibleLineLocked(line string, fromLive bool) {
 	r.promptHistory.visibleLine = line
 	r.promptHistory.visibleFromLive = fromLive
 }
 
+func (r *REPL) promptHistoryVisibleLine() string {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
+	return r.promptHistory.visibleLine
+}
+
 // Run executes the interactive read/parse/dispatch/stream loop until EOF, /quit, or cancellation.
-func (r *REPL) Run(ctx context.Context) error {
+func (r *REPL) Run(ctx context.Context) (runErr error) {
+	if r.isInteractive() {
+		runCtx, cancel := context.WithCancelCause(ctx)
+		ctx = runCtx
+		r.setRunCancel(cancel)
+		defer func() {
+			r.setRunCancel(nil)
+			cancel(nil)
+		}()
+		if err := r.startTerminalFooter(); err != nil {
+			return err
+		}
+		defer func() {
+			if err := r.stopTerminalFooter(); runErr == nil && err != nil {
+				runErr = err
+			}
+		}()
+	}
+
 	reader := r.inputReader()
 
 	for {
+		if err := r.terminalError(); err != nil {
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -213,7 +298,13 @@ func (r *REPL) Run(ctx context.Context) error {
 			return err
 		}
 
-		line, err := r.readInputLine(reader)
+		line, err := r.readInputLine(ctx, reader)
+		if terminalErr := r.terminalError(); terminalErr != nil {
+			return terminalErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		switch {
 		case errors.Is(err, io.EOF) && strings.TrimSpace(line) == "":
 			return nil
@@ -242,12 +333,31 @@ func (r *REPL) PromptApproval(ctx context.Context, prompt string) (bool, error) 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if _, err := io.WriteString(writerOrDiscard(r.Out), prompt); err != nil {
+	r.outputMu.Lock()
+	r.activeApproval = prompt
+	r.activeApprovalInput = ""
+	err := r.writeContentLocked(prompt)
+	r.outputMu.Unlock()
+	if err != nil {
 		return false, err
 	}
+	defer func() {
+		r.outputMu.Lock()
+		r.activeApproval = ""
+		r.activeApprovalInput = ""
+		r.outputMu.Unlock()
+	}()
 
-	line, err := readLine(r.inputReader())
+	var line string
+	if r.isInteractive() {
+		line, err = r.readInteractiveApproval(ctx, r.inputReader())
+	} else {
+		line, err = readLine(r.inputReader())
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 
@@ -269,8 +379,22 @@ func (r *REPL) WriteLocalMessage(_ context.Context, message string) error {
 		message += "\n"
 	}
 
-	_, err := io.WriteString(writerOrDiscard(r.Out), message)
-	return err
+	return r.writeContent(message)
+}
+
+func (r *REPL) updateStatusLine(message string) error {
+	message = strings.TrimSpace(message)
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+
+	r.statusLine = message
+	if r.footer.enabled {
+		return r.renderFooterLocked()
+	}
+	if r.isInteractive() && message != "" {
+		return r.writeContentLocked(message + "\n")
+	}
+	return nil
 }
 
 func (r *REPL) handleLine(ctx context.Context, line string) (stop bool, handled bool, err error) {
@@ -316,6 +440,15 @@ func (r *REPL) handleLine(ctx context.Context, line string) (stop bool, handled 
 }
 
 func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream) error {
+	r.outputMu.Lock()
+	r.activeStreamLine = ""
+	r.outputMu.Unlock()
+	defer func() {
+		r.outputMu.Lock()
+		r.activeStreamLine = ""
+		r.outputMu.Unlock()
+	}()
+
 	wroteText := false
 	endedWithNewline := false
 	var usage *TokenUsage
@@ -324,12 +457,20 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 		chunk, err := stream.Recv(ctx)
 		if errors.Is(err, io.EOF) {
 			if wroteText && !endedWithNewline {
-				if _, writeErr := io.WriteString(writerOrDiscard(r.Out), "\n"); writeErr != nil {
+				if writeErr := r.writeContent("\n"); writeErr != nil {
 					return writeErr
 				}
 			}
 			if usage != nil {
-				if err := r.WriteLocalMessage(ctx, formatTokenUsageSummary(*usage)); err != nil {
+				summary := formatTokenUsageSummary(*usage)
+				if summary == "" {
+					return nil
+				}
+				if r.isInteractive() {
+					if err := r.updateStatusLine(summary); err != nil {
+						return err
+					}
+				} else if err := r.WriteLocalMessage(ctx, summary); err != nil {
 					return err
 				}
 			}
@@ -337,7 +478,7 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 		}
 		if err != nil {
 			if wroteText && !endedWithNewline {
-				if _, writeErr := io.WriteString(writerOrDiscard(r.Out), "\n"); writeErr != nil {
+				if writeErr := r.writeContent("\n"); writeErr != nil {
 					return writeErr
 				}
 			}
@@ -349,12 +490,24 @@ func (r *REPL) renderAssistantStream(ctx context.Context, stream AssistantStream
 		if chunk.Text == "" {
 			continue
 		}
-		if _, err := io.WriteString(writerOrDiscard(r.Out), chunk.Text); err != nil {
+		if err := r.writeAssistantText(chunk.Text); err != nil {
 			return err
 		}
 		wroteText = true
 		endedWithNewline = strings.HasSuffix(chunk.Text, "\n")
 	}
+}
+
+func (r *REPL) writeAssistantText(text string) error {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	parts := strings.Split(text, "\n")
+	if len(parts) == 1 {
+		r.activeStreamLine += text
+	} else {
+		r.activeStreamLine = parts[len(parts)-1]
+	}
+	return r.writeContentLocked(text)
 }
 
 func formatTokenUsageSummary(usage TokenUsage) string {
@@ -365,43 +518,52 @@ func formatTokenUsageSummary(usage TokenUsage) string {
 	return fmt.Sprintf("[Tokens: %d input, %d output]", usage.InputTokens, usage.OutputTokens)
 }
 
-func (r *REPL) readInputLine(reader *bufio.Reader) (string, error) {
+func (r *REPL) readInputLine(ctx context.Context, reader *bufio.Reader) (string, error) {
 	if !r.isInteractive() {
 		return readLine(reader)
 	}
 
-	return r.readInteractiveLine(reader)
+	return r.readInteractiveLine(ctx, reader)
 }
 
-func (r *REPL) readInteractiveLine(reader *bufio.Reader) (string, error) {
+func (r *REPL) readInteractiveLine(ctx context.Context, reader *bufio.Reader) (string, error) {
 	restore, err := r.enterRawMode()
 	if err != nil {
 		return "", err
 	}
 	defer restore()
+	r.setReadingInteractive(true)
+	defer r.setReadingInteractive(false)
 
 	line := ""
 	r.setPromptHistoryVisibleLine(line, true)
 
 	for {
-		ch, _, err := reader.ReadRune()
+		ch, _, err := r.readInteractiveRune(ctx, reader)
 		if err != nil {
-			r.clearInteractiveBlock()
+			if clearErr := r.clearInteractiveBlock(); clearErr != nil {
+				return line, clearErr
+			}
 			return line, err
 		}
 
 		switch ch {
 		case '\n':
-			r.clearInteractiveBlock()
-			if _, err := io.WriteString(writerOrDiscard(r.Out), "\n"); err != nil {
+			if err := r.clearInteractiveBlock(); err != nil {
+				return "", err
+			}
+			if err := r.writeContent("\n"); err != nil {
 				return "", err
 			}
 			return line, nil
 		case '\r':
 			continue
 		case 0x1b:
-			updatedLine, handled, err := r.readInteractiveEscapeSequence(reader, line)
+			updatedLine, handled, err := r.readInteractiveEscapeSequence(ctx, reader, line)
 			if err != nil {
+				if clearErr := r.clearInteractiveBlock(); clearErr != nil {
+					return "", clearErr
+				}
 				return "", err
 			}
 			if !handled {
@@ -425,8 +587,8 @@ func (r *REPL) readInteractiveLine(reader *bufio.Reader) (string, error) {
 	}
 }
 
-func (r *REPL) readInteractiveEscapeSequence(reader *bufio.Reader, currentLine string) (string, bool, error) {
-	next, _, err := reader.ReadRune()
+func (r *REPL) readInteractiveEscapeSequence(ctx context.Context, reader *bufio.Reader, currentLine string) (string, bool, error) {
+	next, _, err := r.readInteractiveRune(ctx, reader)
 	if err != nil {
 		return "", false, err
 	}
@@ -434,7 +596,7 @@ func (r *REPL) readInteractiveEscapeSequence(reader *bufio.Reader, currentLine s
 		return currentLine, false, nil
 	}
 
-	code, _, err := reader.ReadRune()
+	code, _, err := r.readInteractiveRune(ctx, reader)
 	if err != nil {
 		return "", false, err
 	}
@@ -451,23 +613,91 @@ func (r *REPL) readInteractiveEscapeSequence(reader *bufio.Reader, currentLine s
 	}
 }
 
-func (r *REPL) renderInteractiveLine(line string) error {
-	out := writerOrDiscard(r.Out)
-	if _, err := io.WriteString(out, "\r\033[2K"+r.Prompt+line+"\033[s\033[J"); err != nil {
-		return err
+func (r *REPL) readInteractiveApproval(ctx context.Context, reader *bufio.Reader) (string, error) {
+	restore, err := r.enterRawMode()
+	if err != nil {
+		return "", err
 	}
+	defer restore()
 
-	suggestions := r.slashSuggestions(line)
-	for _, suggestion := range suggestions {
-		if _, err := io.WriteString(out, "\n"+suggestion); err != nil {
-			return err
+	line := ""
+	for {
+		ch, _, err := r.readInteractiveRune(ctx, reader)
+		if err != nil {
+			return line, err
+		}
+
+		switch ch {
+		case '\n':
+			if err := r.writeContent("\n"); err != nil {
+				return "", err
+			}
+			return line, nil
+		case '\r':
+			continue
+		case 0x7f, '\b':
+			text := []rune(line)
+			if len(text) > 0 {
+				line = string(text[:len(text)-1])
+			}
+		default:
+			line += string(ch)
+		}
+
+		r.outputMu.Lock()
+		r.activeApprovalInput = line
+		err = r.writeContentLocked("\r\033[2K" + r.activeApproval + line)
+		r.outputMu.Unlock()
+		if err != nil {
+			return "", err
 		}
 	}
-	if _, err := io.WriteString(out, "\033[u"); err != nil {
-		return err
-	}
+}
 
-	return nil
+func (r *REPL) readInteractiveRune(ctx context.Context, reader *bufio.Reader) (rune, int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if file := r.inputFile(); file != nil && reader.Buffered() == 0 {
+		if err := waitForTerminalInput(ctx, file); err != nil {
+			return 0, 0, err
+		}
+	}
+	if err := r.terminalError(); err != nil {
+		return 0, 0, err
+	}
+	ch, size, err := reader.ReadRune()
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if err := r.terminalError(); err != nil {
+		return 0, 0, err
+	}
+	return ch, size, nil
+}
+
+func (r *REPL) renderInteractiveLine(line string) error {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	return r.renderInteractiveLineLocked(line)
+}
+
+func (r *REPL) renderInteractiveLineLocked(line string) error {
+	var rendered strings.Builder
+	rendered.WriteString("\r\033[2K")
+	rendered.WriteString(r.Prompt)
+	rendered.WriteString(line)
+	rendered.WriteString("\033[s\033[J")
+	suggestions := r.slashSuggestions(line)
+	for _, suggestion := range suggestions {
+		rendered.WriteString("\n")
+		rendered.WriteString(suggestion)
+	}
+	rendered.WriteString("\033[u")
+	return r.writeContentLocked(rendered.String())
 }
 
 func (r *REPL) slashSuggestions(line string) []string {
@@ -481,13 +711,17 @@ func (r *REPL) slashSuggestions(line string) []string {
 	return r.slashSuggester(line)
 }
 
-func (r *REPL) clearInteractiveBlock() {
-	_, _ = io.WriteString(writerOrDiscard(r.Out), "\033[s\033[J\033[u")
+func (r *REPL) clearInteractiveBlock() error {
+	return r.writeContent("\033[s\033[J\033[u")
 }
 
 func (r *REPL) writePrompt() error {
-	_, err := io.WriteString(writerOrDiscard(r.Out), r.Prompt)
-	return err
+	if r.isInteractive() {
+		r.setPromptHistoryVisibleLine("", true)
+		return r.renderInteractiveLine("")
+	}
+
+	return r.writeContent(r.Prompt)
 }
 
 func (r *REPL) writeError(err error) error {
@@ -495,8 +729,277 @@ func (r *REPL) writeError(err error) error {
 		return nil
 	}
 
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
 	_, writeErr := fmt.Fprintf(writerOrDiscard(r.Err), "goagent: %v\n", err)
 	return writeErr
+}
+
+func (r *REPL) writeContent(text string) error {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	return r.writeContentLocked(text)
+}
+
+func (r *REPL) writeContentLocked(text string) error {
+	if text == "" {
+		return nil
+	}
+	if _, err := io.WriteString(writerOrDiscard(r.Out), text); err != nil {
+		return err
+	}
+
+	// Interactive redraws use ESC[J to clear suggestion lines. Redraw the
+	// footer after every coordinated content write so that sequence can never
+	// erase a pinned token status.
+	if r.footer.enabled {
+		return r.renderFooterLocked()
+	}
+	return nil
+}
+
+func (r *REPL) startTerminalFooter() error {
+	r.outputMu.Lock()
+	if r.footer.active {
+		r.outputMu.Unlock()
+		return nil
+	}
+	r.footer.active = true
+	err := r.configureFooterLocked(false)
+	r.outputMu.Unlock()
+	if err != nil {
+		return errors.Join(err, r.stopTerminalFooter())
+	}
+
+	if r.outputFile() == nil && r.resizeNotifier == nil {
+		return nil
+	}
+
+	notifier := r.resizeNotifier
+	if notifier == nil {
+		notifier = newResizeNotifier
+	}
+	resizeSignals, stopSignals := notifier()
+	if resizeSignals == nil {
+		return nil
+	}
+	r.resizeStop = make(chan struct{})
+	r.resizeDone = make(chan struct{})
+	r.resizeStopSignals = stopSignals
+	go func() {
+		defer close(r.resizeDone)
+		for {
+			select {
+			case <-r.resizeStop:
+				return
+			case <-resizeSignals:
+				_ = r.handleTerminalResize()
+			}
+		}
+	}()
+	return nil
+}
+
+func (r *REPL) stopTerminalFooter() error {
+	// Stop and join before changing terminal state so a late SIGWINCH cannot
+	// repaint a footer after cleanup.
+	if r.resizeStop != nil {
+		if r.resizeStopSignals != nil {
+			r.resizeStopSignals()
+		}
+		close(r.resizeStop)
+		<-r.resizeDone
+		r.resizeStop = nil
+		r.resizeDone = nil
+		r.resizeStopSignals = nil
+	}
+
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	if !r.footer.active {
+		return nil
+	}
+	var cleanupErr error
+	if r.footer.enabled {
+		_, cleanupErr = io.WriteString(writerOrDiscard(r.Out), fmt.Sprintf("\033[s\033[%d;1H\033[2K\033[r\033[u\r\n", r.footer.size.Height))
+	} else {
+		_, cleanupErr = io.WriteString(writerOrDiscard(r.Out), "\r\n")
+	}
+	r.footer = terminalFooter{}
+	return cleanupErr
+}
+
+func (r *REPL) handleTerminalResize() error {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	if !r.footer.active {
+		return nil
+	}
+	if err := r.configureFooterLocked(true); err != nil {
+		r.terminalOutputErr = err
+		if r.runCancel != nil {
+			r.runCancel(err)
+		}
+		if r.resizeStopSignals != nil {
+			r.resizeStopSignals()
+		}
+		// The writer may already be unusable, but restoring the terminal is
+		// still worthwhile. Do it here because the foreground read can remain
+		// blocked until the user next types; do not create a competing reader.
+		_, _ = io.WriteString(writerOrDiscard(r.Out), "\033[r\r\n")
+		r.footer = terminalFooter{}
+		return err
+	}
+	return nil
+}
+
+func (r *REPL) configureFooterLocked(redraw bool) error {
+	previous := r.footer
+	size, usable := r.lookupTerminalSize()
+	shrink := redraw && previous.enabled && usable && (size.Height < previous.size.Height || size.Width < previous.size.Width)
+	if shrink {
+		if err := r.clearActiveContentLocked(); err != nil {
+			return err
+		}
+	}
+	if previous.enabled {
+		if _, err := io.WriteString(writerOrDiscard(r.Out), fmt.Sprintf("\033[s\033[%d;1H\033[2K\033[r\033[u", previous.size.Height)); err != nil {
+			return err
+		}
+	}
+
+	r.footer.enabled = usable && size.Width >= 1 && size.Height >= 3
+	r.footer.size = size
+	if !r.footer.enabled {
+		if previous.enabled && r.statusLine != "" {
+			if _, err := io.WriteString(writerOrDiscard(r.Out), "\r\n"+r.statusLine+"\n"); err != nil {
+				return err
+			}
+			if r.readingInteractive {
+				return r.renderInteractiveLineLocked(r.promptHistoryVisibleLine())
+			}
+		}
+		return nil
+	}
+
+	if redraw {
+		// DECSTBM homes the cursor, and terminals can clamp a saved cursor to
+		// the new physical bottom before SIGWINCH is delivered. Re-anchor at the
+		// final scrollable row so no subsequent content can collide with the
+		// reserved footer row.
+		sequence := fmt.Sprintf("\033[s\033[1;%dr\033[u", size.Height-1)
+		if shrink {
+			sequence += fmt.Sprintf("\033[%d;1H", size.Height-1)
+		}
+		if _, err := io.WriteString(writerOrDiscard(r.Out), sequence); err != nil {
+			return err
+		}
+	} else {
+		// First scroll the shell's current command into the transcript. Without
+		// this, clearing the new footer row would erase whatever was previously
+		// printed at the terminal bottom. Then anchor the REPL at the final
+		// scrollable row, not row 1 over the transcript.
+		if _, err := io.WriteString(writerOrDiscard(r.Out), fmt.Sprintf("\r\n\033[1;%dr\033[%d;1H", size.Height-1, size.Height-1)); err != nil {
+			return err
+		}
+	}
+	if !shrink {
+		return r.renderFooterLocked()
+	}
+	if r.readingInteractive {
+		return r.renderInteractiveLineLocked(r.promptHistoryVisibleLine())
+	}
+	if r.activeApproval != "" {
+		return r.writeContentLocked("\r\033[2K" + r.activeApproval + r.activeApprovalInput)
+	}
+	if r.activeStreamLine != "" {
+		return r.writeContentLocked("\r\033[2K" + r.activeStreamLine)
+	}
+	return r.renderFooterLocked()
+}
+
+func (r *REPL) clearActiveContentLocked() error {
+	if r.readingInteractive {
+		_, err := io.WriteString(writerOrDiscard(r.Out), "\r\033[2K\033[s\033[J\033[u")
+		return err
+	}
+	if r.activeApproval != "" || r.activeStreamLine != "" {
+		_, err := io.WriteString(writerOrDiscard(r.Out), "\r\033[2K")
+		return err
+	}
+	return nil
+}
+
+func (r *REPL) terminalError() error {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	return r.terminalOutputErr
+}
+
+func (r *REPL) setReadingInteractive(reading bool) {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	r.readingInteractive = reading
+}
+
+func (r *REPL) setRunCancel(cancel context.CancelCauseFunc) {
+	r.outputMu.Lock()
+	defer r.outputMu.Unlock()
+	r.runCancel = cancel
+}
+
+func (r *REPL) lookupTerminalSize() (terminalSize, bool) {
+	provider := r.terminalSizeProvider
+	if provider == nil {
+		provider = currentTerminalSize
+	}
+	return provider(r.outputFile())
+}
+
+func (r *REPL) outputFile() *os.File {
+	file, _ := r.Out.(*os.File)
+	return file
+}
+
+func (r *REPL) inputFile() *os.File {
+	file, _ := r.In.(*os.File)
+	return file
+}
+
+func (r *REPL) renderFooterLocked() error {
+	if !r.footer.enabled {
+		return nil
+	}
+
+	// Reserve one column where possible: writing exactly to the final column can
+	// auto-wrap on many terminals. A one-column footer temporarily disables
+	// autowrap so it can still show a visible truncated marker safely.
+	width := r.footer.size.Width - 1
+	oneColumn := r.footer.size.Width == 1
+	if oneColumn {
+		width = 1
+	}
+	status := truncateTerminalText(r.statusLine, width)
+	prefix, suffix := "", ""
+	if oneColumn {
+		prefix, suffix = "\033[?7l", "\033[?7h"
+	}
+	_, err := io.WriteString(writerOrDiscard(r.Out), fmt.Sprintf("\033[s\033[%d;1H\033[2K%s%s%s\033[u", r.footer.size.Height, prefix, status, suffix))
+	return err
+}
+
+func truncateTerminalText(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 func readLine(reader *bufio.Reader) (string, error) {

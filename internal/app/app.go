@@ -164,7 +164,7 @@ func Bootstrap(options BootstrapOptions) (*App, error) {
 			return newProviderClient(profile)
 		},
 	})
-	application.repl.SetCommandHandlers(newBaseCommandHandlers(application.session, terminalOut))
+	application.repl.SetCommandHandlers(newBaseCommandHandlers(application.session, application.repl.OutputWriter()))
 	application.SetRunner(application.repl)
 
 	return application, nil
