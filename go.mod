@@ -1,3 +1,3 @@
 module github.com/vhar-astro/goagent
 
-go 1.24
+go 1.27.1
