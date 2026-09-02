@@ -156,6 +156,11 @@ Important details:
 - `streaming` must stay enabled in the current v1 runtime
 - provider profiles must declare both streaming and tool-calling support
 
+## Prerequisites
+
+- Go 1.27.1 or newer
+- On macOS, Go 1.27 requires macOS 13 Ventura or newer.
+
 ## Build and run
 
 Build:
