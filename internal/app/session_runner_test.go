@@ -33,8 +33,8 @@ func TestSessionRunnerInlineShellApprovalAndSameTurnResume(t *testing.T) {
 			Type:          provider.ToolTypeFunction,
 			Name:          tools.ToolNameRunShell,
 			ArgumentsJSON: `{"command":"pwd"}`,
-		}),
-		stubTextResponse("done"),
+		}, provider.Usage{}),
+		stubTextResponse("done", provider.Usage{}),
 	}}
 
 	var localMessages []string
@@ -92,8 +92,8 @@ func TestSessionRunnerDeniedShellApprovalContinuesTurn(t *testing.T) {
 			Type:          provider.ToolTypeFunction,
 			Name:          tools.ToolNameRunShell,
 			ArgumentsJSON: `{"command":"pwd"}`,
-		}),
-		stubTextResponse("understood"),
+		}, provider.Usage{}),
+		stubTextResponse("understood", provider.Usage{}),
 	}}
 
 	var localMessages []string
@@ -152,8 +152,8 @@ func TestSessionRunnerReusesExactShellApprovalWithoutPrompt(t *testing.T) {
 			Type:          provider.ToolTypeFunction,
 			Name:          tools.ToolNameRunShell,
 			ArgumentsJSON: `{"command":"pwd"}`,
-		}),
-		stubTextResponse("done"),
+		}, provider.Usage{}),
+		stubTextResponse("done", provider.Usage{}),
 	}}
 
 	var (
@@ -191,6 +191,48 @@ func TestSessionRunnerReusesExactShellApprovalWithoutPrompt(t *testing.T) {
 	}
 	if !foundReuse {
 		t.Fatalf("local messages = %#v, want reused-approval outcome", localMessages)
+	}
+}
+
+func TestSessionRunnerAggregatesUsageAcrossProviderResponses(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	runtime, err := NewRuntime(workspace)
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+
+	sess := session.New("session-usage", workspace, "chutes", "model")
+	sess.SetBuiltInTools([]tools.Spec{tools.BuiltinShellSpec()})
+	sess.ApproveShellCommand("pwd", workspace, time.Time{})
+
+	client := &stubProviderClient{responses: []provider.Response{
+		stubToolCallResponse(``, provider.ToolCall{
+			ID:            "call-1",
+			Type:          provider.ToolTypeFunction,
+			Name:          tools.ToolNameRunShell,
+			ArgumentsJSON: `{"command":"pwd"}`,
+		}, provider.Usage{PromptTokens: 120, CompletionTokens: 45, TotalTokens: 165}),
+		stubTextResponse("done", provider.Usage{PromptTokens: 30, CompletionTokens: 10, TotalTokens: 40}),
+	}}
+
+	runner, err := NewSessionRunner(SessionRunnerOptions{
+		Session: sess,
+		Client:  client,
+		Runtime: &runtime,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionRunner() error = %v", err)
+	}
+
+	if err := runner.RunTurn(context.Background(), "Run pwd."); err != nil {
+		t.Fatalf("RunTurn() error = %v", err)
+	}
+
+	usage := runner.LastTurnUsage()
+	if usage.PromptTokens != 150 || usage.CompletionTokens != 55 || usage.TotalTokens != 205 {
+		t.Fatalf("LastTurnUsage() = %+v, want prompt=150 completion=55 total=205", usage)
 	}
 }
 
@@ -240,27 +282,43 @@ func (c *stubProviderClient) Chat(_ context.Context, request provider.Request) (
 				Delta:      &provider.MessageDelta{Tools: deltas},
 			}
 		}
-		events <- provider.StreamEvent{Type: provider.EventResponseComplete, ResponseID: "resp", Model: request.Model}
+		if response.Usage.TotalTokens > 0 || response.Usage.PromptTokens > 0 || response.Usage.CompletionTokens > 0 {
+			usage := response.Usage
+			events <- provider.StreamEvent{
+				Type:       provider.EventUsage,
+				ResponseID: "resp",
+				Model:      request.Model,
+				Usage:      &usage,
+			}
+		}
+		complete := provider.StreamEvent{Type: provider.EventResponseComplete, ResponseID: "resp", Model: request.Model}
+		if response.Usage.TotalTokens > 0 || response.Usage.PromptTokens > 0 || response.Usage.CompletionTokens > 0 {
+			usage := response.Usage
+			complete.Usage = &usage
+		}
+		events <- complete
 	}()
 
 	return events, nil
 }
 
-func stubToolCallResponse(content string, call provider.ToolCall) provider.Response {
+func stubToolCallResponse(content string, call provider.ToolCall, usage provider.Usage) provider.Response {
 	return provider.Response{
 		Message: provider.Message{
 			Role:      provider.RoleAssistant,
 			Content:   content,
 			ToolCalls: []provider.ToolCall{call},
 		},
+		Usage: usage,
 	}
 }
 
-func stubTextResponse(content string) provider.Response {
+func stubTextResponse(content string, usage provider.Usage) provider.Response {
 	return provider.Response{
 		Message: provider.Message{
 			Role:    provider.RoleAssistant,
 			Content: content,
 		},
+		Usage: usage,
 	}
 }
